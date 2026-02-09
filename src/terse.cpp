@@ -5,6 +5,7 @@
 #include <openssl/sha.h>
 #include <numeric>
 #include <cmath>
+#include <filesystem>
 
 TERSEParams::TERSEParams(uint32_t N, uint64_t t, uint32_t depth,
                          SecurityLevel sec, double sigma)
@@ -53,21 +54,31 @@ bool TERSEParams::validate_parameters(size_t n_clients) const {
 
 void TERSEParams::save(const string& filename) const {
     ofstream out(filename, ios::binary);
+    if (!out) {
+        throw std::runtime_error("Failed to open " + filename + " for writing");
+    }
     out.write(reinterpret_cast<const char*>(&poly_modulus_degree), sizeof(poly_modulus_degree));
     out.write(reinterpret_cast<const char*>(&plain_modulus), sizeof(plain_modulus));
     out.write(reinterpret_cast<const char*>(&cipher_modulus), sizeof(cipher_modulus));
     out.write(reinterpret_cast<const char*>(&mult_depth), sizeof(mult_depth));
     out.write(reinterpret_cast<const char*>(&sec_level), sizeof(sec_level));
     out.write(reinterpret_cast<const char*>(&error_stddev), sizeof(error_stddev));
+    if (!out) {
+        throw std::runtime_error("Failed to write " + filename);
+    }
     out.close();
 }
 
 TERSEParams TERSEParams::load(const string& filename) {
     ifstream in(filename, ios::binary);
-    uint32_t N, depth;
-    uint64_t t, q;
-    SecurityLevel sec;
-    double sigma;
+    if (!in) {
+        throw std::runtime_error("Failed to open " + filename + " for reading");
+    }
+
+    uint32_t N = 0, depth = 0;
+    uint64_t t = 0, q = 0;
+    SecurityLevel sec{};
+    double sigma = 0.0;
 
     in.read(reinterpret_cast<char*>(&N), sizeof(N));
     in.read(reinterpret_cast<char*>(&t), sizeof(t));
@@ -75,6 +86,11 @@ TERSEParams TERSEParams::load(const string& filename) {
     in.read(reinterpret_cast<char*>(&depth), sizeof(depth));
     in.read(reinterpret_cast<char*>(&sec), sizeof(sec));
     in.read(reinterpret_cast<char*>(&sigma), sizeof(sigma));
+
+    if (!in) {
+        throw std::runtime_error("Failed to read params from " + filename);
+    }
+
     in.close();
 
     TERSEParams params(N, t, depth, sec, sigma);
@@ -172,7 +188,6 @@ void TERSESystem::save_A_theta(const DCRTPoly& A_theta, const string& filename) 
         throw runtime_error("Failed to open " + filename);
     }
 
-    // Save in coefficient form for consistency
     DCRTPoly A_copy = A_theta;
     A_copy.SetFormat(Format::COEFFICIENT);
 
@@ -185,15 +200,17 @@ void TERSESystem::save_A_theta(const DCRTPoly& A_theta, const string& filename) 
         size_t n_values = values.GetLength();
         out.write(reinterpret_cast<const char*>(&n_values), sizeof(n_values));
 
-        // Save modulus for verification
         uint64_t modulus = tower.GetModulus().ConvertToInt();
         out.write(reinterpret_cast<const char*>(&modulus), sizeof(modulus));
 
-        // Save coefficients
         for (size_t j = 0; j < n_values; j++) {
             uint64_t val = values[j].ConvertToInt();
             out.write(reinterpret_cast<const char*>(&val), sizeof(val));
         }
+    }
+
+    if (!out) {
+        throw runtime_error("Failed to write " + filename);
     }
     out.close();
 }
@@ -204,22 +221,32 @@ DCRTPoly TERSESystem::load_A_theta(const string& filename) const {
         throw runtime_error("Failed to open " + filename);
     }
 
-    size_t num_towers;
+    size_t num_towers = 0;
     in.read(reinterpret_cast<char*>(&num_towers), sizeof(num_towers));
+    if (!in) {
+        throw runtime_error("Failed to read num_towers from " + filename);
+    }
 
     DCRTPoly A_theta(element_params, Format::COEFFICIENT, true);
 
     for (size_t i = 0; i < num_towers; i++) {
-        size_t n_values;
+        size_t n_values = 0;
         in.read(reinterpret_cast<char*>(&n_values), sizeof(n_values));
 
-        uint64_t modulus;
+        uint64_t modulus = 0;
         in.read(reinterpret_cast<char*>(&modulus), sizeof(modulus));
+
+        if (!in) {
+            throw runtime_error("Failed to read tower header from " + filename);
+        }
 
         NativeVector values(n_values, NativeInteger(modulus));
         for (size_t j = 0; j < n_values; j++) {
-            uint64_t val;
+            uint64_t val = 0;
             in.read(reinterpret_cast<char*>(&val), sizeof(val));
+            if (!in) {
+                throw runtime_error("Failed to read coefficient from " + filename);
+            }
             values[j] = NativeInteger(val);
         }
 
@@ -233,10 +260,8 @@ DCRTPoly TERSESystem::load_A_theta(const string& filename) const {
     return A_theta;
 }
 
-
 void TERSESystem::precompute_client(TERSEClient& client, const DCRTPoly& A_theta, size_t tau) {
     DCRTPoly product = A_theta * client.secret_key;
-
     product.SetFormat(Format::COEFFICIENT);
 
     const auto& first_tower = product.GetElementAtIndex(0);
@@ -245,10 +270,8 @@ void TERSESystem::precompute_client(TERSEClient& client, const DCRTPoly& A_theta
     client.precomputed_p.push_back(p_i);
 }
 
-void TERSESystem::precompute_server(TERSEServer& server,
-                                    const DCRTPoly& A_theta, size_t tau) {
+void TERSESystem::precompute_server(TERSEServer& server, const DCRTPoly& A_theta, size_t tau) {
     DCRTPoly product = A_theta * server.server_key;
-
     product.SetFormat(Format::COEFFICIENT);
 
     const auto& first_tower = product.GetElementAtIndex(0);
@@ -257,7 +280,6 @@ void TERSESystem::precompute_server(TERSEServer& server,
     server.precomputed_p_prime.push_back(p_prime);
 }
 
-// NEW: Batch precomputation for client
 void TERSESystem::precompute_client_batch(TERSEClient& client, const DCRTPoly& A_theta) {
     DCRTPoly product = A_theta * client.secret_key;
     product.SetFormat(Format::COEFFICIENT);
@@ -265,13 +287,11 @@ void TERSESystem::precompute_client_batch(TERSEClient& client, const DCRTPoly& A
     const auto& first_tower = product.GetElementAtIndex(0);
     const auto& values = first_tower.GetValues();
 
-    // Extract all N coefficients at once
     for (size_t tau = 0; tau < values.GetLength(); tau++) {
         client.precomputed_p.push_back(values[tau]);
     }
 }
 
-// NEW: Batch precomputation for server
 void TERSESystem::precompute_server_batch(TERSEServer& server, const DCRTPoly& A_theta) {
     DCRTPoly product = A_theta * server.server_key;
     product.SetFormat(Format::COEFFICIENT);
@@ -279,14 +299,12 @@ void TERSESystem::precompute_server_batch(TERSEServer& server, const DCRTPoly& A
     const auto& first_tower = product.GetElementAtIndex(0);
     const auto& values = first_tower.GetValues();
 
-    // Extract all N coefficients at once
     for (size_t tau = 0; tau < values.GetLength(); tau++) {
         server.precomputed_p_prime.push_back(values[tau]);
     }
 }
 
-NativeInteger TERSESystem::encrypt(const TERSEClient& client, uint32_t plaintext,
-                                   size_t timestamp_idx) {
+NativeInteger TERSESystem::encrypt(const TERSEClient& client, uint32_t plaintext, size_t timestamp_idx) {
     if (plaintext >= params.plain_modulus) {
         throw std::runtime_error("Plaintext exceeds plaintext modulus");
     }
@@ -298,8 +316,7 @@ NativeInteger TERSESystem::encrypt(const TERSEClient& client, uint32_t plaintext
     NativeInteger q_mod = element_params->GetParams()[0]->GetModulus();
 
     int64_t e_i = sample_gaussian_error();
-
-    int64_t combined = static_cast<int64_t>(params.plain_modulus) * e_i + 
+    int64_t combined = static_cast<int64_t>(params.plain_modulus) * e_i +
                        static_cast<int64_t>(plaintext);
 
     NativeInteger result = client.precomputed_p[timestamp_idx];
@@ -314,8 +331,8 @@ NativeInteger TERSESystem::encrypt(const TERSEClient& client, uint32_t plaintext
 }
 
 uint64_t TERSESystem::aggregate(const TERSEServer& server,
-                                const vector<NativeInteger>& ciphertexts,
-                                size_t timestamp_idx) {
+                               const vector<NativeInteger>& ciphertexts,
+                               size_t timestamp_idx) {
     if (timestamp_idx >= server.precomputed_p_prime.size()) {
         throw std::runtime_error("Timestamp index out of bounds");
     }
@@ -349,6 +366,9 @@ uint64_t TERSESystem::aggregate(const TERSEServer& server,
 
 void TERSESystem::save_server_key(const TERSEServer& server, const string& filename) const {
     ofstream out(filename, ios::binary);
+    if (!out) {
+        throw std::runtime_error("Failed to open " + filename + " for writing");
+    }
 
     size_t n_precomputed = server.precomputed_p_prime.size();
     out.write(reinterpret_cast<const char*>(&n_precomputed), sizeof(n_precomputed));
@@ -357,28 +377,47 @@ void TERSESystem::save_server_key(const TERSEServer& server, const string& filen
         uint64_t val = p.ConvertToInt();
         out.write(reinterpret_cast<const char*>(&val), sizeof(val));
     }
+
+    if (!out) {
+        throw std::runtime_error("Failed to write " + filename);
+    }
     out.close();
 }
 
 TERSEServer TERSESystem::load_server_key(const string& filename) {
     ifstream in(filename, ios::binary);
+    if (!in) {
+        throw std::runtime_error("Failed to open " + filename + " for reading");
+    }
+
     TERSEServer server;
 
-    size_t n_precomputed;
+    size_t n_precomputed = 0;
     in.read(reinterpret_cast<char*>(&n_precomputed), sizeof(n_precomputed));
+    if (!in) {
+        throw std::runtime_error("Failed to read server key header from " + filename);
+    }
 
     server.precomputed_p_prime.resize(n_precomputed);
     for (size_t i = 0; i < n_precomputed; i++) {
-        uint64_t val;
+        uint64_t val = 0;
         in.read(reinterpret_cast<char*>(&val), sizeof(val));
+        if (!in) {
+            throw std::runtime_error("Failed to read server key body from " + filename);
+        }
         server.precomputed_p_prime[i] = NativeInteger(val);
     }
+
     in.close();
     return server;
 }
 
 void TERSESystem::save_ciphertexts(const vector<NativeInteger>& cts, const string& filename) const {
     ofstream out(filename, ios::binary);
+    if (!out) {
+        throw std::runtime_error("Failed to open " + filename + " for writing");
+    }
+
     size_t n = cts.size();
     out.write(reinterpret_cast<const char*>(&n), sizeof(n));
 
@@ -386,20 +425,35 @@ void TERSESystem::save_ciphertexts(const vector<NativeInteger>& cts, const strin
         uint64_t val = ct.ConvertToInt();
         out.write(reinterpret_cast<const char*>(&val), sizeof(val));
     }
+
+    if (!out) {
+        throw std::runtime_error("Failed to write " + filename);
+    }
     out.close();
 }
 
 vector<NativeInteger> TERSESystem::load_ciphertexts(const string& filename) const {
     ifstream in(filename, ios::binary);
-    size_t n;
+    if (!in) {
+        throw std::runtime_error("Failed to open " + filename + " for reading");
+    }
+
+    size_t n = 0;
     in.read(reinterpret_cast<char*>(&n), sizeof(n));
+    if (!in) {
+        throw std::runtime_error("Failed to read ciphertext header from " + filename);
+    }
 
     vector<NativeInteger> cts(n);
     for (size_t i = 0; i < n; i++) {
-        uint64_t val;
+        uint64_t val = 0;
         in.read(reinterpret_cast<char*>(&val), sizeof(val));
+        if (!in) {
+            throw std::runtime_error("Failed to read ciphertext body from " + filename);
+        }
         cts[i] = NativeInteger(val);
     }
+
     in.close();
     return cts;
 }
@@ -407,6 +461,9 @@ vector<NativeInteger> TERSESystem::load_ciphertexts(const string& filename) cons
 void TERSESystem::save_ciphertext_matrix(const vector<vector<NativeInteger>>& cts,
                                          const string& filename) const {
     ofstream out(filename, ios::binary);
+    if (!out) {
+        throw std::runtime_error("Failed to open " + filename + " for writing");
+    }
 
     size_t n_rows = cts.size();
     size_t n_cols = n_rows ? cts[0].size() : 0;
@@ -421,44 +478,73 @@ void TERSESystem::save_ciphertext_matrix(const vector<vector<NativeInteger>>& ct
         for (const auto& ct : row) {
             buffer.push_back(ct.ConvertToInt());
         }
-        out.write(reinterpret_cast<const char*>(buffer.data()), 
+        out.write(reinterpret_cast<const char*>(buffer.data()),
                   buffer.size() * sizeof(uint64_t));
+    }
+
+    if (!out) {
+        throw std::runtime_error("Failed to write " + filename);
     }
     out.close();
 }
 
 vector<vector<NativeInteger>> TERSESystem::load_ciphertext_matrix(const string& filename) const {
     ifstream in(filename, ios::binary);
+    if (!in) {
+        throw std::runtime_error("Failed to open " + filename + " for reading");
+    }
+
     size_t n_rows = 0, n_cols = 0;
     in.read(reinterpret_cast<char*>(&n_rows), sizeof(n_rows));
     in.read(reinterpret_cast<char*>(&n_cols), sizeof(n_cols));
+    if (!in) {
+        throw std::runtime_error("Failed to read ciphertext matrix header from " + filename);
+    }
 
     vector<vector<NativeInteger>> cts(n_rows, vector<NativeInteger>(n_cols));
-
     vector<uint64_t> buffer(n_cols);
 
     for (size_t r = 0; r < n_rows; r++) {
-        in.read(reinterpret_cast<char*>(buffer.data()), 
-                buffer.size() * sizeof(uint64_t));
+        in.read(reinterpret_cast<char*>(buffer.data()), buffer.size() * sizeof(uint64_t));
+        if (!in) {
+            throw std::runtime_error("Failed to read ciphertext matrix row from " + filename);
+        }
         for (size_t c = 0; c < n_cols; c++) {
             cts[r][c] = NativeInteger(buffer[c]);
         }
     }
+
     in.close();
     return cts;
 }
 
 void TERSESystem::save_aggregate_result(const NativeInteger& result, const string& filename) const {
     ofstream out(filename, ios::binary);
+    if (!out) {
+        throw std::runtime_error("Failed to open " + filename + " for writing");
+    }
+
     uint64_t val = result.ConvertToInt();
     out.write(reinterpret_cast<const char*>(&val), sizeof(val));
+    if (!out) {
+        throw std::runtime_error("Failed to write " + filename);
+    }
+
     out.close();
 }
 
 NativeInteger TERSESystem::load_aggregate_result(const string& filename) const {
     ifstream in(filename, ios::binary);
-    uint64_t val;
+    if (!in) {
+        throw std::runtime_error("Failed to open " + filename + " for reading");
+    }
+
+    uint64_t val = 0;
     in.read(reinterpret_cast<char*>(&val), sizeof(val));
+    if (!in) {
+        throw std::runtime_error("Failed to read " + filename);
+    }
+
     in.close();
     return NativeInteger(val);
 }
@@ -466,6 +552,10 @@ NativeInteger TERSESystem::load_aggregate_result(const string& filename) const {
 void TERSESystem::save_aggregate_vector(const vector<NativeInteger>& result,
                                         const string& filename) const {
     ofstream out(filename, ios::binary);
+    if (!out) {
+        throw std::runtime_error("Failed to open " + filename + " for writing");
+    }
+
     size_t n = result.size();
     out.write(reinterpret_cast<const char*>(&n), sizeof(n));
 
@@ -474,23 +564,38 @@ void TERSESystem::save_aggregate_vector(const vector<NativeInteger>& result,
     for (const auto& val : result) {
         buffer.push_back(val.ConvertToInt());
     }
-    out.write(reinterpret_cast<const char*>(buffer.data()), 
+    out.write(reinterpret_cast<const char*>(buffer.data()),
               buffer.size() * sizeof(uint64_t));
+
+    if (!out) {
+        throw std::runtime_error("Failed to write " + filename);
+    }
     out.close();
 }
 
 vector<NativeInteger> TERSESystem::load_aggregate_vector(const string& filename) const {
     ifstream in(filename, ios::binary);
+    if (!in) {
+        throw std::runtime_error("Failed to open " + filename + " for reading");
+    }
+
     size_t n = 0;
     in.read(reinterpret_cast<char*>(&n), sizeof(n));
+    if (!in) {
+        throw std::runtime_error("Failed to read aggregate header from " + filename);
+    }
 
     vector<uint64_t> buffer(n);
     in.read(reinterpret_cast<char*>(buffer.data()), buffer.size() * sizeof(uint64_t));
+    if (!in) {
+        throw std::runtime_error("Failed to read aggregate body from " + filename);
+    }
 
     vector<NativeInteger> vals(n);
     for (size_t i = 0; i < n; i++) {
         vals[i] = NativeInteger(buffer[i]);
     }
+
     in.close();
     return vals;
 }
@@ -523,6 +628,10 @@ void TERSESystem::save_client_keys(const vector<TERSEClient>& clients, const str
             }
         }
     }
+
+    if (!out) {
+        throw runtime_error("Failed to write " + filename);
+    }
     out.close();
 }
 
@@ -532,25 +641,37 @@ vector<TERSEClient> TERSESystem::load_client_keys(const string& filename) {
         throw runtime_error("Failed to open " + filename);
     }
 
-    size_t n_clients;
+    size_t n_clients = 0;
     in.read(reinterpret_cast<char*>(&n_clients), sizeof(n_clients));
+    if (!in) {
+        throw runtime_error("Failed to read client keys header from " + filename);
+    }
 
     vector<TERSEClient> clients(n_clients);
 
     for (size_t c = 0; c < n_clients; c++) {
-        size_t num_towers;
+        size_t num_towers = 0;
         in.read(reinterpret_cast<char*>(&num_towers), sizeof(num_towers));
+        if (!in) {
+            throw runtime_error("Failed to read client key tower count from " + filename);
+        }
 
         clients[c].secret_key = DCRTPoly(element_params, Format::COEFFICIENT, true);
 
         for (size_t i = 0; i < num_towers; i++) {
-            size_t n_values;
+            size_t n_values = 0;
             in.read(reinterpret_cast<char*>(&n_values), sizeof(n_values));
+            if (!in) {
+                throw runtime_error("Failed to read client key tower length from " + filename);
+            }
 
             NativeVector values(n_values, element_params->GetParams()[i]->GetModulus());
             for (size_t j = 0; j < n_values; j++) {
-                uint64_t val;
+                uint64_t val = 0;
                 in.read(reinterpret_cast<char*>(&val), sizeof(val));
+                if (!in) {
+                    throw runtime_error("Failed to read client key coeff from " + filename);
+                }
                 values[j] = NativeInteger(val);
             }
 
