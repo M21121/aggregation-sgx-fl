@@ -1,7 +1,6 @@
 """TERSE-FL Server App with secure aggregation."""
 
 import os
-import subprocess
 import numpy as np
 import torch
 from typing import List, Tuple, Dict, Optional
@@ -26,6 +25,8 @@ from pytorchexample.terse_utils import (
     DATA_DIR,
     PROJECT_ROOT,
 )
+
+from pytorchexample.enclave_ipc import PersistentTrustedRound
 
 
 class TERSEFedAvg(FedAvg):
@@ -55,15 +56,13 @@ class TERSEFedAvg(FedAvg):
         params_file = str(DATA_DIR / "params.bin")
         self.terse_server = terse_py.TERSEServer(params_file)
 
-    def _run_sgx_decrypt_round(self, start_ts: int) -> None:
-        cmd = [
-            "gramine-sgx",
-            "sgx/trusted_round",
-            str(start_ts),
-            str(self.n_chunks),
-            str(self.vector_dim),
-        ]
-        subprocess.check_call(cmd, cwd=str(PROJECT_ROOT))
+        # Start ONE enclave process and keep it alive.
+        # server_fn() already does os.chdir(PROJECT_ROOT), but we still pass cwd explicitly.
+        self._enclave = PersistentTrustedRound(
+            project_root=PROJECT_ROOT,
+            cwd=PROJECT_ROOT,
+            stderr_path=DATA_DIR / "trusted_round.stderr.log",
+        )
 
     def _load_decrypted_chunk(self, timestamp: int) -> np.ndarray:
         p = DATA_DIR / f"decrypted_{timestamp}.bin"
@@ -92,7 +91,6 @@ class TERSEFedAvg(FedAvg):
 
         aggregated_flat = np.zeros(self.padded_len, dtype=np.float32)
 
-        # Your existing timestamp mapping:
         # timestamp = (server_round - 1) * n_chunks + chunk_idx
         start_ts = (server_round - 1) * self.n_chunks
 
@@ -108,8 +106,12 @@ class TERSEFedAvg(FedAvg):
             aggregate_ct = self.terse_server.aggregate_ciphertexts(client_ciphertexts, timestamp)
             self.terse_server.save_aggregate(aggregate_ct, timestamp)
 
-        # 2) One enclave launch per round (trusted)
-        self._run_sgx_decrypt_round(start_ts)
+        # 2) Trusted decrypt: reuse the persistent enclave (no restart)
+        self._enclave.decrypt_round(
+            start_ts=start_ts,
+            n_chunks=self.n_chunks,
+            vector_dim=self.vector_dim,
+        )
 
         # 3) Load decrypted chunks and finish aggregation (untrusted post-processing)
         for chunk_idx in range(self.n_chunks):
