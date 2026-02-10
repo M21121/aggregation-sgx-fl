@@ -28,11 +28,11 @@ clientapp = "pytorchexample.client_app:app"
 
 [tool.flwr.app.config]
 # Training hyperparameters
-num-server-rounds = 5
+num-server-rounds = 10
 local-epochs = 1
 batch-size = 32
 learning-rate = 0.01
-fraction-evaluate = 1
+fraction-evaluate = 1.0
 
 # TERSE-specific configuration
 num-clients = 100

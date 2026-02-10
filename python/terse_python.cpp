@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-#include "terse.h"
+#include "terse/terse.h"
 
 namespace py = pybind11;
 
